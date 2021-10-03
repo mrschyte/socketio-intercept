@@ -1,0 +1,6 @@
+click==8.0.1
+Flask==2.0.1
+aiohttp==3.7.4.post0
+httpx==0.19.0
+python-socketio==4.6.1
+uvicorn[standard]==0.15.0
