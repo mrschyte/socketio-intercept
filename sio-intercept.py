@@ -1,5 +1,5 @@
 from asgiref.wsgi import WsgiToAsgi
-from flask import Flask, request
+from flask import Flask, request, make_response
 from dataclasses import dataclass
 
 import aiohttp
@@ -160,9 +160,10 @@ class RestAPIServer(Flask):
         if sid in self.sessions:
             session = self.sessions[sid]
             async with session.lock:
-                events = json.dumps(session.events)
+                resp = make_response(json.dumps(session.events))
+                resp.mimetype = 'application/json'
                 session.events.clear()
-                return events
+                return resp
         return 'KO'
 
 
