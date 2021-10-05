@@ -11,6 +11,7 @@ import asyncio
 import uvicorn
 import click
 import httpx
+import base64
 
 
 @dataclass
@@ -18,6 +19,27 @@ class Session:
     client: socketio.AsyncClient
     lock: asyncio.Lock
     events: [typing.List[typing.Any]]
+
+
+json_encoder_default = json.JSONEncoder.default
+
+
+def json_bytes_encoder_default(self, o):
+    if type(o) == bytes:
+        return {
+            'type': '__json_bytes_value__',
+            'value': base64.b64encode(o).decode('ascii')
+        }
+    return json_encoder_default(self, o)
+
+
+json.JSONEncoder.default = json_bytes_encoder_default
+
+
+def json_decode_bytes_hook(d):
+    if 'type' in d and d['type'] == '__json_bytes_value__' and 'value' in d:
+        return base64.b64decode(d['value'])
+    return d
 
 
 class ServerCatchAllNamespace(socketio.AsyncNamespace):
@@ -43,7 +65,7 @@ class ServerCatchAllNamespace(socketio.AsyncNamespace):
                     response = await client.get('{}/poll/{}'.format(
                         self.listener, self.sessions[sid]
                     ))
-                    events = response.json()
+                    events = response.json(object_hook=json_decode_bytes_hook)
                     for event in events:
                         method, args = event[0], event[1:]
                         await self.emit(method, *args, room=sid)
