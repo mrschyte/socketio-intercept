@@ -43,7 +43,7 @@ def json_decode_bytes_hook(d):
 
 
 class ServerCatchAllNamespace(socketio.AsyncNamespace):
-    def __init__(self, namespace, listener, proxies={}, poll_wait=1):
+    def __init__(self, namespace, listener, cookie_mode, proxies={}, poll_wait=1):
         socketio.AsyncNamespace.__init__(self, namespace)
 
         # url for the uvicorn server listener
@@ -52,6 +52,9 @@ class ServerCatchAllNamespace(socketio.AsyncNamespace):
         # maps from socket io sessions to rest sessions
         self.sessions = {}
 
+        # whether to use cookies for session identification
+        self.cookie_mode = cookie_mode
+
         # interception proxies to use
         self.proxies = proxies
 
@@ -59,12 +62,17 @@ class ServerCatchAllNamespace(socketio.AsyncNamespace):
         self.poll_wait = poll_wait
 
     async def trigger_event(self, *args):
-        async def poll(sid):
+        async def poll(sid, cookie_mode):
             async with httpx.AsyncClient(proxies=self.proxies) as client:
                 while sid in self.sessions:
-                    response = await client.get('{}/poll/{}'.format(
-                        self.listener, self.sessions[sid]
-                    ))
+                    if cookie_mode:
+                        response = await client.get('{}/poll'.format(self.listener),
+                            cookies={'sid': self.sessions[sid]}
+                        )
+                    else:
+                        response = await client.get('{}/poll/{}'.format(
+                            self.listener, self.sessions[sid]
+                        ))
                     events = response.json(object_hook=json_decode_bytes_hook)
                     for event in events:
                         method, args = event[0], event[1:]
@@ -78,19 +86,32 @@ class ServerCatchAllNamespace(socketio.AsyncNamespace):
             if method == 'connect':
                 response = await client.get('{}/connect'.format(self.listener))
                 self.sessions[sid] = response.text
-                asyncio.create_task(poll(sid))
+                asyncio.create_task(poll(sid, self.cookie_mode))
             elif method == 'disconnect':
-                await client.get(
-                    '{}/disconnect/{}'.format(
-                        self.listener, self.sessions[sid])
-                )
+                if self.cookie_mode:
+                    await client.get(
+                        '{}/disconnect'.format(self.listener),
+                        cookies={'sid': self.sessions[sid]}
+                    )
+                else:
+                    await client.get(
+                        '{}/disconnect/{}'.format(
+                            self.listener, self.sessions[sid]),
+                    )
                 del self.sessions[sid]
             else:
-                await client.post(
-                    '{}/emit/{}'.format(
-                        self.listener, self.sessions[sid]),
-                    json={'event': method, 'args': args}
-                )
+                if self.cookie_mode:
+                    await client.post(
+                        '{}/emit'.format(self.listener),
+                        cookies={'sid': self.sessions[sid]},
+                        json={'event': method, 'args': args}
+                    )
+                else:
+                    await client.post(
+                        '{}/emit/{}'.format(
+                            self.listener, self.sessions[sid]),
+                        json={'event': method, 'args': args}
+                    )
 
 
 class ClientCatchAllNamespace(socketio.AsyncClientNamespace):
@@ -104,17 +125,23 @@ class ClientCatchAllNamespace(socketio.AsyncClientNamespace):
 
 
 class RestAPIServer(Flask):
-    def __init__(self, sockio_url):
+    def __init__(self, sockio_url, cookie_mode):
         Flask.__init__(self, __name__)
         self.sockio_url = sockio_url
+        self.cookie_mode = cookie_mode
         self.sessions = {}
         self._init_rules()
 
     def _init_rules(self):
         self.add_url_rule("/connect", "connect", self.connect)
-        self.add_url_rule("/disconnect/<sid>", "disconnect", self.disconnect)
-        self.add_url_rule("/emit/<sid>", "emit", self.emit, methods=['POST'])
-        self.add_url_rule("/poll/<sid>", "poll", self.poll)
+        if self.cookie_mode:
+            self.add_url_rule("/disconnect", "disconnect", self.disconnect, defaults={'sid': None})
+            self.add_url_rule("/emit", "emit", self.emit, methods=['POST'], defaults={'sid': None})
+            self.add_url_rule("/poll", "poll", self.poll, defaults={'sid': None})
+        else:
+            self.add_url_rule("/disconnect/<sid>", "disconnect", self.disconnect)
+            self.add_url_rule("/emit/<sid>", "emit", self.emit, methods=['POST'])
+            self.add_url_rule("/poll/<sid>", "poll", self.poll)
 
     # @app.route("/connect")
     async def connect(self):
@@ -134,10 +161,15 @@ class RestAPIServer(Flask):
             ClientCatchAllNamespace('/', session=session))
 
         await session.client.connect(self.sockio_url)
-        return sid
+        resp = make_response(sid, 200)
+        if self.cookie_mode:
+            resp.set_cookie('sid', sid)
+        return resp
 
     # @app.route("/disconnect/<sid>")
     async def disconnect(self, sid):
+        if sid is None and self.cookie_mode:
+            sid = request.cookies.get('sid')
         if sid in self.sessions:
             session = self.sessions[sid]
             await session.client.disconnect()
@@ -147,6 +179,8 @@ class RestAPIServer(Flask):
 
     # @app.route("/emit/<sid>", methods=['POST'])
     async def emit(self, sid):
+        if sid is None and self.cookie_mode:
+            sid = request.cookies.get('sid')
         if sid in self.sessions:
             session = self.sessions[sid]
             data = request.json
@@ -157,6 +191,8 @@ class RestAPIServer(Flask):
 
     # @app.route("/poll/<sid>")
     async def poll(self, sid):
+        if sid is None and self.cookie_mode:
+            sid = request.cookies.get('sid')
         if sid in self.sessions:
             session = self.sessions[sid]
             async with session.lock:
@@ -172,7 +208,8 @@ class RestAPIServer(Flask):
 @click.option('--listen-port', default=8000, type=int, show_default=True)
 @click.option('--mitm-proxy', default='http://localhost:8080', type=str, show_default=True)
 @click.option('--sockio-url', default='https://socketio-chat-h9jt.herokuapp.com', type=str, show_default=True)
-def main(listen_host, listen_port, mitm_proxy, sockio_url):
+@click.option('--cookie-mode/--no-cookie-mode', default=False, type=bool, show_default=True)
+def main(listen_host, listen_port, mitm_proxy, sockio_url, cookie_mode):
     proxies = {
         'http://': mitm_proxy,
         'https://': mitm_proxy
@@ -183,10 +220,10 @@ def main(listen_host, listen_port, mitm_proxy, sockio_url):
 
     sock_srv.register_namespace(
         ServerCatchAllNamespace('/', 'http://{}:{}'.format(
-            listen_host, listen_port), proxies)
+            listen_host, listen_port), cookie_mode, proxies)
     )
 
-    rest_app = WsgiToAsgi(RestAPIServer(sockio_url))
+    rest_app = WsgiToAsgi(RestAPIServer(sockio_url, cookie_mode))
     main_app = socketio.ASGIApp(sock_srv, other_asgi_app=rest_app)
 
     uvicorn.run(main_app, host=listen_host, port=listen_port)

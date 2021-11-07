@@ -39,11 +39,14 @@ python sio-intercept.py --help
 Usage: sio-intercept.py [OPTIONS]
 
 Options:
-  --listen-host TEXT     [default: localhost]
-  --listen-port INTEGER  [default: 8000]
-  --mitm-proxy TEXT      [default: http://localhost:8080]
-  --sockio-url TEXT      [default: https://socketio-chat-h9jt.herokuapp.com]
-  --help
+  --listen-host TEXT              [default: localhost]
+  --listen-port INTEGER           [default: 8000]
+  --mitm-proxy TEXT               [default: http://localhost:8080]
+  --sockio-url TEXT               [default: https://socketio-
+                                  chat-h9jt.herokuapp.com]
+  --cookie-mode / --no-cookie-mode
+                                  [default: no-cookie-mode]
+  --help                          Show this message and exit.
 ```
 
 If everything is set up correctly, you should see the SocketIO messages in your interception proxy:
@@ -57,6 +60,8 @@ The `listen-host` and `listen-port` are used to set the listening address for th
 The `mitm-proxy` setting is used to specify the listening host/port for your interception proxy.
 
 The `sockio-url` parameter must be set to the correct SocketIO url for the target application.
+
+The `--cookie-mode / --no-cookie-mode` flag specifies whether to pass the session id in a cookie or not. Enabling cookie mode can be useful to keep certain application scanners in session.
 
 Proxy settings for posting intercepted traffic (`/emit` and `/poll`) requests) will be loaded from the `http_proxy` and `https_proxy` environment variables.
 
